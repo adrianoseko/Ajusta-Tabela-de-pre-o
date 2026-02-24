@@ -1,7 +1,7 @@
 import os
 import sys
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import pandas as pd
 import pyodbc
@@ -20,7 +20,12 @@ class PriceTableApp:
     Preserves original application behavior while improving structure and clarity.
     """
 
-    def __init__(self, argv: list[str]):
+    DB_DRIVER = "{SQL Server}"
+    DB_SERVER = " Seu Servidor"
+    DB_UID = "login"
+    DB_PWD = "senha"
+
+    def __init__(self, argv: List[str]):
         # Parse arguments (kept consistent with original positions)
         try:
             self.bc = argv[1]
@@ -35,14 +40,15 @@ class PriceTableApp:
         self.user = self.us.split('/u:')
 
         # DB driver and connection (kept as in original)
-        self.drive = "{SQL Server}"
+        self.drive = self.DB_DRIVER
         self.cnxn = self._connect_db()
         self.cursor = self.cnxn.cursor()
 
         # Data containers
-        self.tables_df = pd.DataFrame()
-        self.items_df = pd.DataFrame()
+        self.tables_df: pd.DataFrame = pd.DataFrame()
+        self.items_df: pd.DataFrame = pd.DataFrame()
         self.selected_table_index: Optional[int] = None
+        self.selected_table_id: Optional[Any] = None
 
         # Build UI
         self.root = Tk()
@@ -68,8 +74,8 @@ class PriceTableApp:
     def _connect_db(self) -> pyodbc.Connection:
         try:
             conn_str = (
-                f"DRIVER={self.drive};SERVER= Seu Servidor;DATABASE={self.banco[1]};"
-                "UID=login;PWD=senha;"
+                f"DRIVER={self.drive};SERVER={self.DB_SERVER};DATABASE={self.banco[1]};"
+                f"UID={self.DB_UID};PWD={self.DB_PWD};"
             )
             return pyodbc.connect(conn_str)
         except Exception as exc:
@@ -260,28 +266,7 @@ class PriceTableApp:
             self.tree.configure(yscrollcommand=None)
 
             # Show edit fields
-            self.code_entry['state'] = NORMAL
-            self.code_label.place(x=50, y=480)
-            self.code_entry.place(x=50, y=500)
-
-            self.name_entry['state'] = NORMAL
-            self.name_label.place(x=200, y=480)
-            self.name_entry.place(x=200, y=500)
-
-            self.price_label.place(x=50, y=530)
-            self.price_entry.place(x=50, y=550)
-
-            self.cost_label.place(x=200, y=530)
-            self.cost_entry.place(x=200, y=550)
-
-            self.margin_label.place(x=350, y=530)
-            self.margin_entry.place(x=350, y=550)
-
-            self.addf_label.place(x=500, y=530)
-            self.addf_entry.place(x=500, y=550)
-
-            self.save_button.place(x=700, y=530)
-            self.cancel_button.place(x=700, y=560)
+            self._show_edit_widgets()
 
             # Get selected item values
             selected_id = self.tree.selection()[0]
@@ -315,6 +300,48 @@ class PriceTableApp:
         except Exception:
             logging.exception("Error preparing item for edit")
             messagebox.showerror("Erro", '"Não foi possível selecionar item para edição.\nEntre em contato com o suporte!"')
+
+    def _show_edit_widgets(self) -> None:
+        # Place edit widgets in the same coordinates as original
+        self.code_entry['state'] = NORMAL
+        self.code_label.place(x=50, y=480)
+        self.code_entry.place(x=50, y=500)
+
+        self.name_entry['state'] = NORMAL
+        self.name_label.place(x=200, y=480)
+        self.name_entry.place(x=200, y=500)
+
+        self.price_label.place(x=50, y=530)
+        self.price_entry.place(x=50, y=550)
+
+        self.cost_label.place(x=200, y=530)
+        self.cost_entry.place(x=200, y=550)
+
+        self.margin_label.place(x=350, y=530)
+        self.margin_entry.place(x=350, y=550)
+
+        self.addf_label.place(x=500, y=530)
+        self.addf_entry.place(x=500, y=550)
+
+        self.save_button.place(x=700, y=530)
+        self.cancel_button.place(x=700, y=560)
+
+    def _hide_edit_widgets(self) -> None:
+        # Hide edit widgets (used in multiple places)
+        self.code_label.place_forget()
+        self.code_entry.place_forget()
+        self.name_label.place_forget()
+        self.name_entry.place_forget()
+        self.price_label.place_forget()
+        self.price_entry.place_forget()
+        self.cost_label.place_forget()
+        self.cost_entry.place_forget()
+        self.margin_label.place_forget()
+        self.margin_entry.place_forget()
+        self.addf_label.place_forget()
+        self.addf_entry.place_forget()
+        self.save_button.place_forget()
+        self.cancel_button.place_forget()
 
     def apply_filter(self) -> None:
         """Filter treeview rows by product name (case sensitive by original logic using upper)."""
@@ -358,26 +385,11 @@ class PriceTableApp:
                 " WHERE CODCOLIGADA = 5 AND IDPRD = {idprd} and IDTABPRECO = {idtab}"
             ).format(preco=preco, custo=custo, margem=margem, adc=adc, idprd=idprd, idtab=self.selected_table_id)
 
-            self.cursor.execute(update)
-            # commit via connection to ensure persistence
-            self.cnxn.commit()
+            self._execute_update(update)
 
             # Hide edit fields and restore UI
-            self.code_label.place_forget()
-            self.code_entry.place_forget()
-            self.name_label.place_forget()
-            self.name_entry.place_forget()
-            self.price_label.place_forget()
-            self.price_entry.place_forget()
-            self.cost_label.place_forget()
-            self.cost_entry.place_forget()
-            self.margin_label.place_forget()
-            self.margin_entry.place_forget()
-            self.addf_label.place_forget()
-            self.addf_entry.place_forget()
+            self._hide_edit_widgets()
             self.vscrollbar.place_forget()
-            self.save_button.place_forget()
-            self.cancel_button.place_forget()
 
             messagebox.showinfo("Sucesso!", "Alterações salvas com sucesso!")
 
@@ -386,6 +398,15 @@ class PriceTableApp:
         except Exception:
             logging.exception("Failed to save changes")
             messagebox.showerror("Erro Sistema", '"Não foi possível efetuar as alterações \b\n                             Entre em contato com o suporte!"')
+
+    def _execute_update(self, sql_statement: str) -> None:
+        try:
+            self.cursor.execute(sql_statement)
+            # commit via connection to ensure persistence
+            self.cnxn.commit()
+        except Exception:
+            logging.exception("Database update failed")
+            raise
 
     def export(self) -> None:
         """Export current items DataFrame to Excel and open it."""
@@ -414,20 +435,7 @@ class PriceTableApp:
             self.filter_label.place(x=390, y=15)
 
             # Hide edit fields
-            self.code_label.place_forget()
-            self.code_entry.place_forget()
-            self.name_label.place_forget()
-            self.name_entry.place_forget()
-            self.price_label.place_forget()
-            self.price_entry.place_forget()
-            self.cost_label.place_forget()
-            self.cost_entry.place_forget()
-            self.margin_label.place_forget()
-            self.margin_entry.place_forget()
-            self.addf_label.place_forget()
-            self.addf_entry.place_forget()
-            self.save_button.place_forget()
-            self.cancel_button.place_forget()
+            self._hide_edit_widgets()
 
             # Clear entries
             self.code_entry.delete(0, END)
