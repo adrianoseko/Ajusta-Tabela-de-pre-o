@@ -6,35 +6,27 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 
 namespace AjustaTabprd
 {
     /// <summary>
     /// GUI application to view and edit price table items.
-    /// This is a C# WinForms port of the original Python Tkinter application,
-    /// preserving behavior and improving structure and error handling.
+    /// Refactored: separates data access (repository) and business logic (service).
+    /// The Form now only coordinates UI interactions.
+    /// Behavior preserved from original version.
     /// </summary>
-    public class PriceTableForm : Form
+    public partial class PriceTableForm : Form
     {
         // Database connection placeholders (update accordingly)
         private const string DbServer = " Seu Servidor";
         private const string DbUid = "login";
         private const string DbPwd = "senha";
 
-        // Parsed command-line tokens
         private readonly string[] _banco;
         private readonly string[] _user;
         private readonly string[] _coligada;
-
-        // Data containers
-        private DataTable _tablesTable = new DataTable();
-        private DataTable _itemsTable = new DataTable();
-        private int _selectedTableIndex = -1;
-        private object _selectedTableId = null;
-
-        // ADO.NET
-        private readonly SqlConnection _connection;
 
         // UI controls
         private readonly ComboBox _tableCombo = new ComboBox();
@@ -63,38 +55,45 @@ namespace AjustaTabprd
 
         private readonly BindingSource _itemsBinding = new BindingSource();
 
+        // Architectural components
+        private readonly IPriceTableRepository _repository;
+        private readonly PriceTableService _service;
+
+        // State
+        private DataTable _tablesTable = new DataTable();
+        private DataTable _itemsTable = new DataTable();
+        private int _selectedTableIndex = -1;
+        private object _selectedTableId = null;
+
         public PriceTableForm(string[] args)
         {
-            // Parse args similar to original: expect positions 1..3
+            // Validate and parse arguments (keeps original splitting behavior)
             if (args == null || args.Length < 4)
             {
                 MessageBox.Show("Expected three command-line arguments: banco, usuario, coligada", "Arguments", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Environment.Exit(1);
             }
 
-            // Keep the same split behavior as original
             _banco = args[1].Split(new[] { "/d:" }, StringSplitOptions.None);
             _user = args[2].Split(new[] { "/u:" }, StringSplitOptions.None);
             _coligada = args[3].Split(new[] { "/c:" }, StringSplitOptions.None);
 
-            // Initialize form
-            InitializeForm();
+            // Build connection string exactly as original
+            var connStringBuilder = new SqlConnectionStringBuilder
+            {
+                DataSource = DbServer,
+                InitialCatalog = _banco.Length > 1 ? _banco[1] : string.Empty,
+                UserID = DbUid,
+                Password = DbPwd,
+                IntegratedSecurity = false,
+                ConnectTimeout = 30
+            };
 
-            // Setup DB connection
+            // Initialize repository and service
             try
             {
-                var connString = new SqlConnectionStringBuilder
-                {
-                    DataSource = DbServer,
-                    InitialCatalog = _banco.Length > 1 ? _banco[1] : string.Empty,
-                    UserID = DbUid,
-                    Password = DbPwd,
-                    IntegratedSecurity = false,
-                    ConnectTimeout = 30
-                }.ConnectionString;
-
-                _connection = new SqlConnection(connString);
-                _connection.Open();
+                _repository = new SqlPriceTableRepository(connStringBuilder.ConnectionString);
+                _service = new PriceTableService(_repository);
             }
             catch (Exception ex)
             {
@@ -104,7 +103,9 @@ namespace AjustaTabprd
                 return;
             }
 
-            // Load initial table list
+            InitializeForm();
+
+            // Load initial tables
             LoadTableList();
         }
 
@@ -137,7 +138,7 @@ namespace AjustaTabprd
             // Vertical scrollbar (visual parity)
             _vScroll.Location = new Point(783, 50);
             _vScroll.Size = new Size(17, 425);
-            _vScroll.Visible = false; // we rely on DataGridView's internal scroll
+            _vScroll.Visible = false; // rely on DataGridView's internal scroll
             this.Controls.Add(_vScroll);
 
             // Filter label and box
@@ -252,9 +253,9 @@ namespace AjustaTabprd
             this.Controls.Add(_addfBox);
 
             // Info labels bottom
-            var bancoLabel = new Label { Text = $"Banco: {_bancoSafe()}", Location = new Point(50, 580), AutoSize = true };
-            var coligadaLabel = new Label { Text = $"Coligada: {_coligadaSafe()}", Location = new Point(200, 580), AutoSize = true };
-            var userLabel = new Label { Text = $"Usuario: {_userSafe()}", Location = new Point(280, 580), AutoSize = true };
+            var bancoLabel = new Label { Text = $"Banco: {BancoSafe()}", Location = new Point(50, 580), AutoSize = true };
+            var coligadaLabel = new Label { Text = $"Coligada: {ColigadaSafe()}", Location = new Point(200, 580), AutoSize = true };
+            var userLabel = new Label { Text = $"Usuario: {UserSafe()}", Location = new Point(280, 580), AutoSize = true };
             var versionLabel = new Label { Text = "Versão: 1.0", Location = new Point(500, 580), AutoSize = true };
 
             this.Controls.Add(bancoLabel);
@@ -263,29 +264,17 @@ namespace AjustaTabprd
             this.Controls.Add(versionLabel);
         }
 
-        private string _bancoSafe() => _banco != null && _banco.Length > 1 ? _banco[1] : string.Empty;
-        private string _userSafe() => _user != null && _user.Length > 1 ? _user[1] : string.Empty;
-        private string _coligadaSafe() => _coligada != null && _coligada.Length > 1 ? _coligada[1] : string.Empty;
+        private string BancoSafe() => _banco != null && _banco.Length > 1 ? _banco[1] : string.Empty;
+        private string UserSafe() => _user != null && _user.Length > 1 ? _user[1] : string.Empty;
+        private string ColigadaSafe() => _coligada != null && _coligada.Length > 1 ? _coligada[1] : string.Empty;
 
         private void LoadTableList()
         {
-            string sql =
-                "SELECT ZTC.IDTABPRECO, NOME from ZA_TTABPRECO ZTC " +
-                "LEFT JOIN TTABPRECO TTP (NOLOCK) ON TTP.CODCOLIGADA = ZTC.CODCOLIGADA AND TTP.IDTABPRECO = ZTC.IDTABPRECO " +
-                "where USADEFAULTABELA = 'N' and " +
-                "TTP.IDTABPRECO > 3 AND TTP.ATIVA = 1 AND " +
-                "CONVERT(VARCHAR(10) , GETDATE() , 126) >= CONVERT(VARCHAR(10) , TTP.DATAVIGENCIAINI , 126) AND" +
-                "CONVERT(VARCHAR(10) , GETDATE() , 126) <= CONVERT(VARCHAR(10) , TTP.DATAVIGENCIAFIM , 126)";
-
             try
             {
-                using (var adapter = new SqlDataAdapter(sql, _connection))
-                {
-                    _tablesTable = new DataTable();
-                    adapter.Fill(_tablesTable);
-                }
+                _tablesTable = _service.FetchPriceTables();
 
-                if (_tablesTable.Rows.Count == 0)
+                if (_tablesTable == null || _tablesTable.Rows.Count == 0)
                 {
                     MessageBox.Show("Nenhuma tabela de preço encontrada.", "Informação", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
@@ -315,7 +304,6 @@ namespace AjustaTabprd
             var selectedName = _tableCombo.SelectedItem as string;
             if (string.IsNullOrEmpty(selectedName) || _tablesTable == null) return;
 
-            // Find index and id
             try
             {
                 var rows = _tablesTable.AsEnumerable().ToList();
@@ -324,65 +312,48 @@ namespace AjustaTabprd
 
                 _selectedTableIndex = idx;
                 _selectedTableId = _tablesTable.Rows[idx]["IDTABPRECO"];
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine(ex);
-                return;
-            }
 
-            // Query items
-            string sql2 =
-                "SELECT  IDTABPRECO, ZTC.IDPRD , CODIGOPRD, NOMEFANTASIA, PRECO, CUSTO, MARGEM, ADIC_FINANC  from ZA_TTABPRECOITM ZTC " +
-                "LEFT JOIN TPRD (NOLOCK) ON TPRD.CODCOLIGADA = ZTC.CODCOLIGADA AND TPRD.IDPRD = ZTC.IDPRD " +
-                $"where IDTABPRECO = {_selectedTableId} ORDER BY NOMEFANTASIA";
+                _itemsTable = _service.FetchItemsForTable(_selectedTableId);
 
-            try
-            {
-                using (var adapter = new SqlDataAdapter(sql2, _connection))
-                {
-                    _itemsTable = new DataTable();
-                    adapter.Fill(_itemsTable);
-                }
+                _itemsBinding.DataSource = _itemsTable;
+                _grid.DataSource = _itemsBinding;
+
+                ConfigureGridColumns();
+
+                _filterLabel.Visible = true;
+                _filterBox.Visible = true;
+                _exportButton.Visible = true;
+                _cancelToMenuButton.Visible = true;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine(ex);
                 MessageBox.Show("Não foi possível carregar itens da tabela!\nEntre em contato com o suporte!", "ERRO!", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
             }
-
-            // Bind to grid
-            _itemsBinding.DataSource = _itemsTable;
-            _grid.DataSource = _itemsBinding;
-
-            // Configure columns similar to original widths/headings
-            ConfigureGridColumns();
-
-            // Show filter and export controls
-            _filterLabel.Visible = true;
-            _filterBox.Visible = true;
-            _exportButton.Visible = true;
-            _cancelToMenuButton.Visible = true;
         }
 
         private void ConfigureGridColumns()
         {
-            // Clear automatic order/widths
-            foreach (DataGridViewColumn col in _grid.Columns)
+            try
             {
-                col.Width = 100;
-                col.SortMode = DataGridViewColumnSortMode.NotSortable;
-            }
+                foreach (DataGridViewColumn col in _grid.Columns)
+                {
+                    col.Width = 100;
+                    col.SortMode = DataGridViewColumnSortMode.NotSortable;
+                }
 
-            // Ensure columns exist and set names/widths like original
-            SetColumnIfExists("IDPRD", "ID Produto", 80);
-            SetColumnIfExists("CODIGOPRD", "Código Produto", 100);
-            SetColumnIfExists("NOMEFANTASIA", "Nome Produto", 300);
-            SetColumnIfExists("PRECO", "Preço", 60);
-            SetColumnIfExists("CUSTO", "Custo", 60);
-            SetColumnIfExists("MARGEM", "Margem", 60);
-            SetColumnIfExists("ADIC_FINANC", "Adcional Financeiro", 100);
+                SetColumnIfExists("IDPRD", "ID Produto", 80);
+                SetColumnIfExists("CODIGOPRD", "Código Produto", 100);
+                SetColumnIfExists("NOMEFANTASIA", "Nome Produto", 300);
+                SetColumnIfExists("PRECO", "Preço", 60);
+                SetColumnIfExists("CUSTO", "Custo", 60);
+                SetColumnIfExists("MARGEM", "Margem", 60);
+                SetColumnIfExists("ADIC_FINANC", "Adcional Financeiro", 100);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex);
+            }
         }
 
         private void SetColumnIfExists(string columnName, string headerText, int width)
@@ -392,11 +363,6 @@ namespace AjustaTabprd
                 var col = _grid.Columns[columnName];
                 col.HeaderText = headerText;
                 col.Width = width;
-            }
-            else if (_grid.Columns.Count > 0)
-            {
-                // fallback: try to map by index if structure differs
-                // nothing to do if not present
             }
         }
 
@@ -412,10 +378,7 @@ namespace AjustaTabprd
                 }
                 else
                 {
-                    // original did simple substring search on the product name
-                    // DataTable expressions are case-insensitive depending on collation; to be safe, use LINQ to create a filtered DataView
-                    var dv = _itemsTable.DefaultView;
-                    dv.RowFilter = $"CONVERT(NOMEFANTASIA, 'System.String') LIKE '%{EscapeLikeValue(filterText)}%'";
+                    var dv = _service.FilterItemsByName(_itemsTable, filterText);
                     _itemsBinding.DataSource = dv;
                     _grid.DataSource = _itemsBinding;
                 }
@@ -427,12 +390,6 @@ namespace AjustaTabprd
             }
         }
 
-        private static string EscapeLikeValue(string value)
-        {
-            // Escape % and [ characters for LIKE expression
-            return value.Replace("%", "[%]").Replace("[", "[[]");
-        }
-
         private void BeginEditSelected()
         {
             try
@@ -442,14 +399,12 @@ namespace AjustaTabprd
                 var values = row.DataBoundItem as DataRowView;
                 if (values == null) return;
 
-                // Hide main controls that should not show during edit
                 _exportButton.Visible = false;
                 _cancelToMenuButton.Visible = false;
                 _tableCombo.Enabled = false;
                 _filterBox.Visible = false;
                 _filterLabel.Visible = false;
 
-                // Populate edit boxes
                 _codeBox.Text = values.Row.Field<string>("CODIGOPRD") ?? string.Empty;
                 _nameBox.Text = values.Row.Field<string>("NOMEFANTASIA") ?? string.Empty;
                 _priceBox.Text = Convert.ToString(values.Row["PRECO"] ?? string.Empty);
@@ -457,10 +412,8 @@ namespace AjustaTabprd
                 _marginBox.Text = Convert.ToString(values.Row["MARGEM"] ?? string.Empty);
                 _addfBox.Text = Convert.ToString(values.Row["ADIC_FINANC"] ?? string.Empty);
 
-                // Show edit widgets
                 ShowEditWidgets(true);
 
-                // Make grid non-interactive similar to original
                 _grid.Enabled = false;
             }
             catch (Exception ex)
@@ -514,29 +467,11 @@ namespace AjustaTabprd
                 _marginBox.Text = string.Empty;
                 _addfBox.Text = string.Empty;
 
-                // Update SQL (parameterized for safety)
-                var updateSql =
-                    "UPDATE ZA_TTABPRECOITM SET PRECO = @preco, CUSTO = @custo, MARGEM = @margem, ADIC_FINANC = @adc " +
-                    "WHERE CODCOLIGADA = 5 AND IDPRD = @idprd and IDTABPRECO = @idtab";
-
-                using (var cmd = new SqlCommand(updateSql, _connection))
-                {
-                    // Try to convert to decimal where plausible, otherwise pass raw
-                    AddSqlParameterWithNullableDecimal(cmd, "@preco", preco);
-                    AddSqlParameterWithNullableDecimal(cmd, "@custo", custo);
-                    AddSqlParameterWithNullableDecimal(cmd, "@margem", margem);
-                    AddSqlParameterWithNullableDecimal(cmd, "@adc", adc);
-
-                    cmd.Parameters.AddWithValue("@idprd", idprd);
-                    cmd.Parameters.AddWithValue("@idtab", _selectedTableId);
-
-                    var affected = cmd.ExecuteNonQuery();
-                    Debug.WriteLine($"Rows updated: {affected}");
-                }
+                var affected = _service.UpdateItem(_selectedTableId, idprd, preco, custo, margem, adc);
+                Debug.WriteLine($"Rows updated: {affected}");
 
                 MessageBox.Show("Alterações salvas com sucesso!", "Sucesso!", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
-                // Hide edit widgets and refresh
                 ShowEditWidgets(false);
                 _grid.Enabled = true;
                 _tableCombo.Enabled = true;
@@ -550,23 +485,6 @@ namespace AjustaTabprd
             {
                 Debug.WriteLine(ex);
                 MessageBox.Show("Não foi possível efetuar as alterações.\nEntre em contato com o suporte!", "Erro Sistema", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private static void AddSqlParameterWithNullableDecimal(SqlCommand cmd, string paramName, string value)
-        {
-            if (decimal.TryParse(value?.Replace(',', '.'), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var dec))
-            {
-                cmd.Parameters.AddWithValue(paramName, dec);
-            }
-            else if (string.IsNullOrWhiteSpace(value))
-            {
-                cmd.Parameters.AddWithValue(paramName, DBNull.Value);
-            }
-            else
-            {
-                // If cannot parse, pass as string - database may coerce or reject
-                cmd.Parameters.AddWithValue(paramName, value);
             }
         }
 
@@ -584,11 +502,10 @@ namespace AjustaTabprd
                 var filename = fileBase + ".csv"; // Write CSV for portability
                 var fullPath = Path.Combine(Directory.GetCurrentDirectory(), filename);
 
-                WriteDataTableToCsv(_itemsTable, fullPath);
+                _service.ExportToCsv(_itemsTable, fullPath);
 
                 MessageBox.Show("Tabela exportada com sucesso!", "Exportação Excel", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
-                // Try to open the file at a hardcoded path as original attempted
                 var hardcodedPath = Path.Combine("C:", "Users", "admin", "Desktop", "Adriano", "Projetos_SW", "TABELA DE PREÇO", filename);
 
                 try
@@ -599,14 +516,13 @@ namespace AjustaTabprd
                     }
                     else
                     {
-                        // open the newly created file
                         Process.Start(new ProcessStartInfo { FileName = fullPath, UseShellExecute = true });
                     }
                 }
                 catch (Exception openEx)
                 {
                     Debug.WriteLine(openEx);
-                    // Not critical; just notify user that export succeeded
+                    // Not critical; user already informed
                 }
             }
             catch (Exception ex)
@@ -616,45 +532,15 @@ namespace AjustaTabprd
             }
         }
 
-        private static void WriteDataTableToCsv(DataTable table, string filePath)
-        {
-            using (var writer = new StreamWriter(filePath, false, System.Text.Encoding.UTF8))
-            {
-                // Header
-                var columnNames = table.Columns.Cast<DataColumn>().Select(c => EscapeCsv(c.ColumnName));
-                writer.WriteLine(string.Join(";", columnNames));
-
-                // Rows
-                foreach (DataRow row in table.Rows)
-                {
-                    var fields = table.Columns.Cast<DataColumn>().Select(c => EscapeCsv(Convert.ToString(row[c]) ?? string.Empty));
-                    writer.WriteLine(string.Join(";", fields));
-                }
-            }
-        }
-
-        private static string EscapeCsv(string s)
-        {
-            if (s.Contains("\"")) s = s.Replace("\"", "\"\"");
-            if (s.Contains(";") || s.Contains("\n") || s.Contains("\r") || s.Contains("\""))
-            {
-                return "\"" + s + "\"";
-            }
-
-            return s;
-        }
-
         private void CancelEdit()
         {
             try
             {
-                // Restore main controls
                 _exportButton.Visible = true;
                 _cancelToMenuButton.Visible = true;
                 _filterBox.Visible = true;
                 _filterLabel.Visible = true;
 
-                // Hide edit widgets and clear fields
                 ShowEditWidgets(false);
                 _codeBox.Text = string.Empty;
                 _nameBox.Text = string.Empty;
@@ -675,7 +561,6 @@ namespace AjustaTabprd
 
         private void CancelToMenu()
         {
-            // Clear and hide items view, akin to original
             _tableCombo.Enabled = true;
             _grid.DataSource = null;
             _itemsTable = new DataTable();
@@ -688,9 +573,21 @@ namespace AjustaTabprd
             _filterBox.Visible = false;
             _filterLabel.Visible = false;
 
-            // Show only the combo box to select a table again
             _tableCombo.Visible = true;
             _grid.Visible = true;
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+            try
+            {
+                (_repository as IDisposable)?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex);
+            }
         }
 
         [STAThread]
@@ -700,6 +597,202 @@ namespace AjustaTabprd
             Application.SetCompatibleTextRenderingDefault(false);
             var form = new PriceTableForm(args);
             Application.Run(form);
+        }
+    }
+
+    // Service layer: business rules and orchestration
+    public class PriceTableService
+    {
+        private readonly IPriceTableRepository _repository;
+
+        public PriceTableService(IPriceTableRepository repository)
+        {
+            _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+        }
+
+        public DataTable FetchPriceTables()
+        {
+            return _repository.GetPriceTables();
+        }
+
+        public DataTable FetchItemsForTable(object tableId)
+        {
+            return _repository.GetItemsByTableId(tableId);
+        }
+
+        public int UpdateItem(object tableId, object idPrd, string preco, string custo, string margem, string adc)
+        {
+            return _repository.UpdateItem(idPrd, tableId, preco, custo, margem, adc);
+        }
+
+        public DataView FilterItemsByName(DataTable itemsTable, string nameFilterUpper)
+        {
+            if (itemsTable == null) throw new ArgumentNullException(nameof(itemsTable));
+
+            var dv = itemsTable.DefaultView;
+            var escaped = SqlPriceTableRepository.EscapeLikeValue(nameFilterUpper);
+            dv.RowFilter = $"CONVERT(NOMEFANTASIA, 'System.String') LIKE '%{escaped}%'";
+            return dv;
+        }
+
+        public void ExportToCsv(DataTable table, string path)
+        {
+            CsvExporter.WriteDataTableToCsv(table, path);
+        }
+    }
+
+    // Repository: data access
+    public interface IPriceTableRepository : IDisposable
+    {
+        DataTable GetPriceTables();
+        DataTable GetItemsByTableId(object tableId);
+        int UpdateItem(object idPrd, object idTab, string preco, string custo, string margem, string adc);
+    }
+
+    public class SqlPriceTableRepository : IPriceTableRepository
+    {
+        private readonly SqlConnection _connection;
+        private bool _disposed;
+
+        public SqlPriceTableRepository(string connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString)) throw new ArgumentException("connectionString");
+            _connection = new SqlConnection(connectionString);
+            _connection.Open();
+        }
+
+        public DataTable GetPriceTables()
+        {
+            const string sql =
+                "SELECT ZTC.IDTABPRECO, NOME from ZA_TTABPRECO ZTC " +
+                "LEFT JOIN TTABPRECO TTP (NOLOCK) ON TTP.CODCOLIGADA = ZTC.CODCOLIGADA AND TTP.IDTABPRECO = ZTC.IDTABPRECO " +
+                "where USADEFAULTABELA = 'N' and " +
+                "TTP.IDTABPRECO > 3 AND TTP.ATIVA = 1 AND " +
+                "CONVERT(VARCHAR(10) , GETDATE() , 126) >= CONVERT(VARCHAR(10) , TTP.DATAVIGENCIAINI , 126) AND" +
+                "CONVERT(VARCHAR(10) , GETDATE() , 126) <= CONVERT(VARCHAR(10) , TTP.DATAVIGENCIAFIM , 126)";
+
+            var table = new DataTable();
+            using (var adapter = new SqlDataAdapter(sql, _connection))
+            {
+                adapter.Fill(table);
+            }
+
+            return table;
+        }
+
+        public DataTable GetItemsByTableId(object tableId)
+        {
+            if (tableId == null) throw new ArgumentNullException(nameof(tableId));
+
+            var sql =
+                "SELECT  IDTABPRECO, ZTC.IDPRD , CODIGOPRD, NOMEFANTASIA, PRECO, CUSTO, MARGEM, ADIC_FINANC  from ZA_TTABPRECOITM ZTC " +
+                "LEFT JOIN TPRD (NOLOCK) ON TPRD.CODCOLIGADA = ZTC.CODCOLIGADA AND TPRD.IDPRD = ZTC.IDPRD " +
+                "where IDTABPRECO = @idtab ORDER BY NOMEFANTASIA";
+
+            var table = new DataTable();
+            using (var cmd = new SqlCommand(sql, _connection))
+            {
+                cmd.Parameters.AddWithValue("@idtab", tableId);
+                using (var adapter = new SqlDataAdapter(cmd))
+                {
+                    adapter.Fill(table);
+                }
+            }
+
+            return table;
+        }
+
+        public int UpdateItem(object idPrd, object idTab, string preco, string custo, string margem, string adc)
+        {
+            if (idPrd == null) throw new ArgumentNullException(nameof(idPrd));
+            if (idTab == null) throw new ArgumentNullException(nameof(idTab));
+
+            const string updateSql =
+                "UPDATE ZA_TTABPRECOITM SET PRECO = @preco, CUSTO = @custo, MARGEM = @margem, ADIC_FINANC = @adc " +
+                "WHERE CODCOLIGADA = 5 AND IDPRD = @idprd and IDTABPRECO = @idtab";
+
+            using (var cmd = new SqlCommand(updateSql, _connection))
+            {
+                AddSqlParameterWithNullableDecimal(cmd, "@preco", preco);
+                AddSqlParameterWithNullableDecimal(cmd, "@custo", custo);
+                AddSqlParameterWithNullableDecimal(cmd, "@margem", margem);
+                AddSqlParameterWithNullableDecimal(cmd, "@adc", adc);
+
+                cmd.Parameters.AddWithValue("@idprd", idPrd);
+                cmd.Parameters.AddWithValue("@idtab", idTab);
+
+                return cmd.ExecuteNonQuery();
+            }
+        }
+
+        internal static string EscapeLikeValue(string value)
+        {
+            if (value == null) return string.Empty;
+            return value.Replace("%", "[%]").Replace("[", "[[]");
+        }
+
+        private static void AddSqlParameterWithNullableDecimal(SqlCommand cmd, string paramName, string value)
+        {
+            if (decimal.TryParse(value?.Replace(',', '.'), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var dec))
+            {
+                cmd.Parameters.AddWithValue(paramName, dec);
+            }
+            else if (string.IsNullOrWhiteSpace(value))
+            {
+                cmd.Parameters.AddWithValue(paramName, DBNull.Value);
+            }
+            else
+            {
+                cmd.Parameters.AddWithValue(paramName, value);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            try
+            {
+                _connection?.Close();
+                _connection?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex);
+            }
+            _disposed = true;
+        }
+    }
+
+    // CSV Exporter (single responsibility)
+    public static class CsvExporter
+    {
+        public static void WriteDataTableToCsv(DataTable table, string filePath)
+        {
+            if (table == null) throw new ArgumentNullException(nameof(table));
+            if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("filePath");
+
+            using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
+            {
+                var columnNames = table.Columns.Cast<DataColumn>().Select(c => EscapeCsv(c.ColumnName));
+                writer.WriteLine(string.Join(";", columnNames));
+
+                foreach (DataRow row in table.Rows)
+                {
+                    var fields = table.Columns.Cast<DataColumn>().Select(c => EscapeCsv(Convert.ToString(row[c]) ?? string.Empty));
+                    writer.WriteLine(string.Join(";", fields));
+                }
+            }
+        }
+
+        private static string EscapeCsv(string s)
+        {
+            if (s.Contains("\"")) s = s.Replace("\"", "\"\"");
+            if (s.Contains(";") || s.Contains("\n") || s.Contains("\r") || s.Contains("\""))
+            {
+                return "\"" + s + "\"";
+            }
+
+            return s;
         }
     }
 }
